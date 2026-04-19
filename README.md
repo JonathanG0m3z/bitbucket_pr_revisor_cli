@@ -23,7 +23,7 @@ fetch_pr  ──►  router  ──┬──►  security_agent   ──┐
 
 - **Parallel execution** — the three agents run concurrently via LangGraph's Send API; no sequential bottleneck.
 - **Pluggable AI backends** — each agent can be independently assigned to Claude Code, OpenAI Codex, or Gemini CLI through environment variables.
-- **Private Bitbucket support** — authenticates via App Password or Bearer token; no OAuth dance required.
+- **Private Bitbucket support** — authenticates via Bitbucket API Token (Basic auth) or App Password; no OAuth dance required.
 - **Large diff handling** — diffs exceeding 8 000 characters are automatically split at file boundaries (max 3 files per CLI call).
 - **Structured output** — every agent responds in JSON; the consolidator produces an executive summary with a Top 5 action list.
 - **120-second timeout** per agent with clean temp-file teardown.
@@ -74,12 +74,18 @@ All configuration is done through environment variables. Copy `.env.example` to 
 
 Use **one** of the two strategies:
 
-| Strategy | Variables |
-|---|---|
-| App Password | `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD` |
-| Access Token | `BITBUCKET_TOKEN` |
+| Strategy | Variables | Auth type |
+|---|---|---|
+| API Token *(recommended)* | `BITBUCKET_EMAIL` + `BITBUCKET_TOKEN` | Basic auth |
+| App Password | `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD` | Basic auth |
 
-If `BITBUCKET_TOKEN` is set, it takes precedence.
+**API Token setup** (recommended):
+1. Go to **bitbucket.org → your avatar → Account settings → Security → API tokens**
+2. Click **Create API token with scopes**
+3. Enable both: **Repositories: Read** + **Pull requests: Read**
+4. Set `BITBUCKET_EMAIL` to your Atlassian account email and `BITBUCKET_TOKEN` to the generated token
+
+If both strategies are configured, API Token takes precedence.
 
 ### AI CLI Keys
 
