@@ -1,32 +1,46 @@
 # Bitbucket PR Reviewer CLI
 
-> Automated Pull Request review system powered by **LangGraph** and three specialized AI CLI agents running in true parallel.
+> Automated Pull Request review system powered by **LangGraph** and a single AI CLI agent that covers security, performance, and code style in one pass.
 
 ---
 
 ## Overview
 
-This tool fetches the diff of any private Bitbucket Pull Request and distributes it to three independent AI agents — each focused on a different review dimension. The results are consolidated into a single executive report with a 0–10 quality score and a prioritized action list.
+This tool fetches the diff of any private Bitbucket Pull Request and passes it to a single AI CLI process that produces a consolidated review with a 0–10 quality score and a prioritized action list.
+
+When `CLI=gemini`, the Gemini CLI internally delegates to three specialist subagents running in parallel — parallelism happens inside Gemini's own orchestration layer, not in LangGraph.
 
 ```
 PR URL
   │
   ▼
-fetch_pr  ──►  router  ──┬──►  security_agent   ──┐
-                         ├──►  performance_agent ──┤──►  consolidate  ──►  final report
-                         └──►  style_agent       ──┘
+connect_bitbucket  (validates credentials via GET /2.0/user)
+  │
+  ▼
+fetch_diff  (GET /2.0/repositories/{ws}/{repo}/pullrequests/{id}/diff)
+  │
+  ▼
+run_cli  ──── claude / codex: unified prompt (security + performance + style in one pass)
+         └─── gemini: orchestrator prompt → @security_reviewer
+                                          → @performance_reviewer   (parallel internally)
+                                          → @style_reviewer
+  │
+  ▼
+report  (unified JSON: score, severity, issues per section, top_actions, summary)
 ```
 
 ---
 
 ## Features
 
-- **Parallel execution** — the three agents run concurrently via LangGraph's Send API; no sequential bottleneck.
-- **Pluggable AI backends** — each agent can be independently assigned to Claude Code, OpenAI Codex, or Gemini CLI through environment variables.
+- **Single CLI process** — one subprocess call covers all three review dimensions; no coordination overhead.
+- **Gemini subagent mode** — when `CLI=gemini`, three specialist subagents (`@security_reviewer`, `@performance_reviewer`, `@style_reviewer`) run in parallel inside Gemini's own orchestration layer.
+- **Pluggable AI backends** — set `CLI=claude`, `CLI=codex`, or `CLI=gemini` to switch backends.
 - **Private Bitbucket support** — authenticates via Bitbucket API Token (Basic auth) or App Password; no OAuth dance required.
-- **Large diff handling** — diffs exceeding 8 000 characters are automatically split at file boundaries (max 3 files per CLI call).
-- **Structured output** — every agent responds in JSON; the consolidator produces an executive summary with a Top 5 action list.
-- **120-second timeout** per agent with clean temp-file teardown.
+- **Credential validation upfront** — `connect_bitbucket` node validates credentials before fetching the diff, giving immediate feedback on auth issues.
+- **Full-diff context** — the entire diff is sent in a single CLI call. Modern context windows (Gemini 2.5 Pro: 1M tokens, Claude Sonnet: 200K, Codex: 128K) handle typical PRs without splitting.
+- **Structured output** — the CLI responds in JSON; `main.py` parses and prints each section with issues and line numbers.
+- **120-second timeout** per CLI call with clean temp-file teardown.
 
 ---
 
@@ -41,11 +55,11 @@ fetch_pr  ──►  router  ──┬──►  security_agent   ──┐
 
 At least one of the following CLIs must be installed and authenticated:
 
-| CLI | Install |
-|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` |
-| [OpenAI Codex](https://github.com/openai/codex) | `npm install -g @openai/codex` |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm install -g @google/gemini-cli` |
+| CLI | Install | Price |
+|---|---|---|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | $20/mo Pro |
+| [OpenAI Codex](https://github.com/openai/codex) | `npm install -g @openai/codex` | Included in ChatGPT Plus $20/mo |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm install -g @google/gemini-cli` | Free (1 000 req/day) |
 
 ---
 
@@ -87,23 +101,27 @@ Use **one** of the two strategies:
 
 If both strategies are configured, API Token takes precedence.
 
-### AI CLI Keys
+### AI CLI Selection
+
+```env
+CLI=claude   # claude | codex | gemini
+```
+
+A single variable controls which CLI backend runs the full review.
+
+| Value | Behavior |
+|---|---|
+| `claude` | Single unified prompt covering all three dimensions |
+| `codex` | Single unified prompt covering all three dimensions |
+| `gemini` | Orchestrator prompt delegates to `@security_reviewer`, `@performance_reviewer`, `@style_reviewer` in parallel |
+
+### API Keys (if required by your CLI)
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AI...
 ```
-
-### Agent CLI Assignment
-
-```env
-CLI_SECURITY=claude       # claude | codex | gemini
-CLI_PERFORMANCE=codex
-CLI_STYLE=gemini
-```
-
-Each variable controls which CLI backend runs that specific agent. Mix and match freely.
 
 ---
 
@@ -117,42 +135,37 @@ python main.py "https://bitbucket.org/myworkspace/myrepo/pull-requests/42"
 
 ```
 ════════════════════════════════════════
- SECURITY REPORT
+ PR REVIEW  —  Score: 6/10  |  Severity: HIGH
 ════════════════════════════════════════
-{
-  "issues": [
-    {"line": 17, "type": "vuln", "description": "Hardcoded AWS key in config.py"}
-  ],
-  "severity": "critical",
-  "summary": "One critical vulnerability found."
-}
 
 ════════════════════════════════════════
- PERFORMANCE REPORT
+ SECURITY REVIEW
 ════════════════════════════════════════
-{
-  "issues": [],
-  "severity": "low",
-  "summary": "No significant performance issues detected."
-}
+One critical vulnerability found in the authentication module.
+  Line 17: [vuln] Hardcoded AWS key in config.py
 
 ════════════════════════════════════════
- STYLE REPORT
+ PERFORMANCE REVIEW
 ════════════════════════════════════════
-{
-  "issues": [
-    {"line": 34, "type": "style", "description": "Function name does not follow snake_case convention"}
-  ],
-  "severity": "medium",
-  "summary": "Minor naming inconsistencies."
-}
+No significant performance issues detected.
 
 ════════════════════════════════════════
- EXECUTIVE SUMMARY  —  Score: 4/10
+ STYLE REVIEW
 ════════════════════════════════════════
-Top 5 Actions:
+Minor naming inconsistencies found.
+  Line 34: [style] Function name does not follow snake_case convention
+
+════════════════════════════════════════
+ TOP 5 ACTIONS
+════════════════════════════════════════
 1. [CRITICAL] Remove hardcoded AWS key on line 17 (config.py)
+2. Rename function on line 34 to follow snake_case
 ...
+
+════════════════════════════════════════
+ EXECUTIVE SUMMARY
+════════════════════════════════════════
+The PR introduces one critical security vulnerability...
 ```
 
 ---
@@ -161,12 +174,17 @@ Top 5 Actions:
 
 ```
 bitbucket_pr_revisor_cli/
-├── main.py          # Entry point — accepts PR URL, runs graph, prints report
-├── graph.py         # LangGraph StateGraph: nodes, edges, fan-out via Send API
-├── agents.py        # Async agent functions, CLI subprocess runner, prompt constants
-├── bitbucket.py     # httpx client: URL parser, auth, diff fetcher
+├── main.py              # Entry point — accepts PR URL, runs graph, prints report
+├── graph.py             # LangGraph StateGraph: 3 linear nodes
+├── agents.py            # Unified agent runner, prompts, diff splitter, chunk merger
+├── bitbucket.py         # httpx client: connect() + fetch_diff(), URL parser, auth
 ├── requirements.txt
 ├── .env.example
+├── .gemini/
+│   └── agents/
+│       ├── security_reviewer.md    # Gemini subagent: security specialist
+│       ├── performance_reviewer.md # Gemini subagent: performance specialist
+│       └── style_reviewer.md       # Gemini subagent: style specialist
 └── tests/
     ├── test_bitbucket.py
     ├── test_agents.py
@@ -182,42 +200,29 @@ bitbucket_pr_revisor_cli/
 ```python
 class AgentState(TypedDict):
     pr_url: str
+    auth: dict    # {"strategy": "token"|"app_password", "credentials": (user, secret)}
     diff: str
-    security_report: str
-    performance_report: str
-    style_report: str
-    final_report: str
-    reviews: Annotated[list, operator.add]  # concurrent-safe accumulator
+    report: str
 ```
 
-The `reviews` field uses `operator.add` as a reducer, allowing all three agent nodes to write to it simultaneously without race conditions.
+The `auth` field is populated by `connect_bitbucket` and consumed by `fetch_diff`, keeping credential resolution isolated from diff fetching.
 
-### Fan-out via Send API
+### Linear Pipeline
 
-The `router` node does not call agents sequentially. It returns a list of `Send` objects — LangGraph schedules all three as independent parallel branches:
+Three nodes, no fan-out:
 
 ```python
-def router(state: AgentState) -> list[Send]:
-    return [
-        Send("security_agent", state),
-        Send("performance_agent", state),
-        Send("style_agent", state),
-    ]
+workflow.add_edge(START, "connect_bitbucket")
+workflow.add_edge("connect_bitbucket", "fetch_diff")
+workflow.add_edge("fetch_diff", "run_cli")
+workflow.add_edge("run_cli", END)
 ```
 
-### CLI Integration Pattern
+### Gemini Subagent Mode
 
-Each agent:
-1. Writes a specialized prompt + diff chunk to a temporary `.md` file.
-2. Invokes the CLI via `asyncio.create_subprocess_exec`.
-3. Awaits completion with a 120-second hard timeout.
-4. Cleans up the temp file in a `finally` block regardless of outcome.
+When `CLI=gemini`, the orchestrator prompt references the three subagents using Gemini CLI's native `@agent_name` syntax. Gemini resolves these against `.gemini/agents/*.md` files at runtime and runs them in parallel internally. Results are consolidated into a single JSON response by the Gemini orchestrator before returning to the Python process.
 
-### Large Diff Handling
-
-If the diff exceeds 8 000 characters, `split_diff()` splits it at `diff --git` markers, grouping at most 3 files per chunk. Each chunk is processed independently and results are concatenated.
-
----
+Subagent files require Gemini CLI v0.38.1+.
 
 ## Running Tests
 
